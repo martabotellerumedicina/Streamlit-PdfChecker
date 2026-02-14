@@ -1,65 +1,112 @@
 import streamlit as st
-import fitz
-import re
+import pdfplumber
 import pandas as pd
-from collections import Counter
-from io import BytesIO
+import re
+import io
 
-# -------------------------------------------------
-# CONFIGURACIÓ STREAMLIT
-# -------------------------------------------------
+st.set_page_config(page_title="PDF Exam Matcher", layout="wide")
 
-st.set_page_config(
-        page_title="Comparador Models Moodle",
-            layout="wide"
-)
+st.title("Comparador de Models d'Examen (Moodle PDF)")
 
-# -------------------------------------------------
-# UTILITATS
-# -------------------------------------------------
+# -----------------------------
+# FUNCIONS
+# -----------------------------
 
 def normalitzar(text):
-    """Normalitza text per assegurar coincidència exacta robusta."""
-        return " ".join(text.strip().split()).lower()
+    return " ".join(text.strip().split()).lower()
 
+def extreure_preguntes(pdf_file):
+    preguntes = {}
+    with pdfplumber.open(pdf_file) as pdf:
+        text_complet = ""
+        for pagina in pdf.pages:
+            text_complet += pagina.extract_text() + "\n"
 
-        @st.cache_data(show_spinner=False)
-        def extreure_preguntes(pdf_bytes):
-            """
-                Extreu preguntes que:
-                    - Comencen amb '1)', '2)', etc.
-                        - Finalitzen quan detecta text en cursiva
-                            """
-                                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                                    preguntes = []
-                                        pregunta_actual = ""
-                                            capturant = False
+    # Separació per número de pregunta (ex: 1. , 2. , 10.)
+    blocs = re.split(r"\n\s*(\d+)\.\s", text_complet)
 
-                                                for pagina in doc:
-                                                        blocks = pagina.get_text("dict")["blocks"]
+    # blocs[0] és text abans de la primera pregunta
+    for i in range(1, len(blocs), 2):
+        numero = blocs[i]
+        contingut = blocs[i + 1]
+        preguntes[numero] = normalitzar(contingut)
 
-                                                                for block in blocks:
-                                                                            if "lines" not in block:
-                                                                                            continue
+    return preguntes
 
-                                                                                                        for line in block["lines"]:
-                                                                                                                        for span in line["spans"]:
-                                                                                                                                            text = span["text"].strip()
+def comparar_models(base, model):
+    correspondencia = []
+    for num_base, text_base in base.items():
+        for num_model, text_model in model.items():
+            if text_base == text_model:
+                correspondencia.append({
+                    "Pregunta_Model_Base": num_base,
+                    "Pregunta_Model_Alt": num_model
+                })
+                break
+    return correspondencia
 
-                                                                                                                                                                # Inici pregunta
-                                                                                                                                                                                    if re.match(r"^\d+\)", text):
-                                                                                                                                                                                                            if pregunta_actual:
-                                                                                                                                                                                                                                        preguntes.append(normalitzar(pregunta_actual))
-                                                                                                                                                                                                                                                                pregunta_actual = text
-                                                                                                                                                                                                                                                                                        capturant = True
-                                                                                                                                                                                                                                                                                                                continue
+# -----------------------------
+# INTERFÍCIE
+# -----------------------------
 
-                                                                                                                                                                                                                                                                                                                                    # Cursiva = final pregunta
-                                                                                                                                                                                                                                                                                                                                                        if capturant and (span["flags"] & 2):
-                                                                                                                                                                                                                                                                                                                                                                                preguntes.append(normalitzar(pregunta_actual))
-                                                                                                                                                                                                                                                                                                                                                                                                        pregunta_actual = ""
-                                                                                                                                                                                                                                                                                                                                                                                                                                capturant = False
-                                                                                                                                                                                                                                                                                                                                                                                                                                                        continue
+st.subheader("1️⃣ Pujar Model Base (Model A)")
+
+model_base_file = st.file_uploader(
+    "Puja el PDF del model base",
+    type="pdf",
+    key="base"
+)
+
+if model_base_file:
+    base_preguntes = extreure_preguntes(model_base_file)
+    st.success(f"Model base carregat. Preguntes trobades: {len(base_preguntes)}")
+
+    st.subheader("2️⃣ Pujar Altres Models a Comparar")
+
+    altres_models = st.file_uploader(
+        "Puja un o més PDFs",
+        type="pdf",
+        accept_multiple_files=True
+    )
+
+    if altres_models:
+
+        progress = st.progress(0)
+        resultats_totals = []
+
+        for idx, model_file in enumerate(altres_models):
+
+            model_preguntes = extreure_preguntes(model_file)
+
+            st.info(f"{model_file.name} → Preguntes trobades: {len(model_preguntes)}")
+
+            correspondencia = comparar_models(base_preguntes, model_preguntes)
+
+            for fila in correspondencia:
+                fila["Model"] = model_file.name
+
+            resultats_totals.extend(correspondencia)
+
+            progress.progress((idx + 1) / len(altres_models))
+
+        if resultats_totals:
+            df = pd.DataFrame(resultats_totals)
+
+            st.subheader("Resultats")
+            st.dataframe(df)
+
+            csv_buffer = io.StringIO()
+            df.to_csv(csv_buffer, index=False)
+
+            st.download_button(
+                label="Descarregar CSV",
+                data=csv_buffer.getvalue(),
+                file_name="correspondencia_models.csv",
+                mime="text/csv"
+            )
+        else:
+            st.warning("No s'han trobat coincidències exactes.")
+            continue
 
                                                                                                                                                                                                                                                                                                                                                                                                                                                                             if capturant:
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     pregunta_actual += " " + text
