@@ -9,11 +9,19 @@ import unicodedata
 # -----------------------------
 
 def normalize(text):
-    text = unicodedata.normalize("NFKC", text)
-    text = text.replace("\n", " ")
-    text = re.sub(r"\s+", " ", text)
-    return text.strip().lower()
+    import unicodedata
 
+    text = unicodedata.normalize("NFKD", text)
+    text = text.encode("ascii", "ignore").decode("utf-8")
+
+    text = text.replace("\xa0", " ")
+    text = text.replace("’", "'")
+    text = text.replace("–", "-")
+
+    text = re.sub(r"\s+", " ", text)
+
+    return text.strip().lower()
+    
 
 # -----------------------------
 # EXTREURE NOMÉS LÍNIA CATALANA
