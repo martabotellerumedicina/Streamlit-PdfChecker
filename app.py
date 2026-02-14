@@ -1,142 +1,104 @@
 import streamlit as st
 import pdfplumber
-import pandas as pd
 import re
-import io
+import pandas as pd
 import unicodedata
 
-st.set_page_config(page_title="PDF Exam Matcher", layout="wide")
-st.title("Comparador de Models d'Examen (només text en català)")
+# -----------------------------
+# NORMALITZACIÓ TEXT
+# -----------------------------
 
-# --------------------------------------------------
-# NORMALITZACIÓ
-# --------------------------------------------------
-
-def normalitzar(text):
-    text = unicodedata.normalize("NFD", text)
-    text = text.encode("ascii", "ignore").decode("utf-8")
+def normalize(text):
+    text = unicodedata.normalize("NFKC", text)
     text = text.replace("\n", " ")
-    text = " ".join(text.split())
-    return text.lower()
+    text = re.sub(r"\s+", " ", text)
+    return text.strip().lower()
 
-# --------------------------------------------------
-# EXTREURE NOMÉS TEXT NO CURSIVA (català)
-# --------------------------------------------------
 
-def extreure_text_catala(pdf_file):
-    text_total = ""
+# -----------------------------
+# EXTREURE NOMÉS LÍNIA CATALANA
+# -----------------------------
+
+def extract_questions(pdf_file):
+    questions = {}
 
     with pdfplumber.open(pdf_file) as pdf:
         for page in pdf.pages:
-            for ch in page.chars:
-                fontname = ch.get("fontname", "")
+            text = page.extract_text()
+            if not text:
+                continue
 
-                # Eliminem text en cursiva (castellà)
-                if "Italic" not in fontname and "Oblique" not in fontname:
-                    text_total += ch.get("text", "")
+            lines = text.split("\n")
 
-            text_total += "\n"
+            for line in lines:
+                line = line.strip()
 
-    return text_total
+                # Detectar línies que comencen amb número de pregunta
+                match = re.match(r"^(\d+)\)\s+(.*)", line)
 
-# --------------------------------------------------
-# EXTREURE PREGUNTES
-# --------------------------------------------------
+                if match:
+                    number = int(match.group(1))
+                    question_text = match.group(2)
 
-def extreure_preguntes(pdf_file):
-    text_complet = extreure_text_catala(pdf_file)
+                    # Ignorar capçaleres estranyes
+                    if len(question_text) < 10:
+                        continue
 
-    preguntes = {}
+                    questions[normalize(question_text)] = number
 
-    # Detecta format: 1) 2) 3)
-    blocs = re.split(r"\n\s*(\d+)\)\s", text_complet)
+    return questions
 
-    for i in range(1, len(blocs), 2):
-        numero = blocs[i]
-        contingut = blocs[i + 1]
-        preguntes[numero] = normalitzar(contingut)
 
-    return preguntes
+# -----------------------------
+# STREAMLIT APP
+# -----------------------------
 
-# --------------------------------------------------
-# COMPARAR MODELS
-# --------------------------------------------------
+st.title("Comparador de Models d'Examen (Català només)")
 
-def comparar_models(base, model):
-    correspondencia = []
+st.header("1️⃣ Pujar Model Base (Model A)")
+base_pdf = st.file_uploader("Puja el PDF base", type="pdf")
 
-    for num_base, text_base in base.items():
-        for num_model, text_model in model.items():
-            if text_base == text_model:
-                correspondencia.append({
-                    "Pregunta_Model_Base": num_base,
-                    "Pregunta_Model_Alt": num_model
-                })
-                break
-
-    return correspondencia
-
-# --------------------------------------------------
-# INTERFÍCIE
-# --------------------------------------------------
-
-st.subheader("1️⃣ Pujar Model Base (Model A)")
-
-model_base_file = st.file_uploader(
-    "Puja el PDF del model base",
+st.header("2️⃣ Pujar Models a comparar (fins a 4)")
+other_pdfs = st.file_uploader(
+    "Puja la resta de models",
     type="pdf",
-    key="base"
+    accept_multiple_files=True
 )
 
-if model_base_file:
+if base_pdf and other_pdfs:
 
-    base_preguntes = extreure_preguntes(model_base_file)
-    st.success(f"Model base carregat. Preguntes trobades: {len(base_preguntes)}")
+    st.write("Processant models...")
 
-    st.subheader("2️⃣ Pujar Altres Models a Comparar")
+    base_questions = extract_questions(base_pdf)
+    st.success(f"Model base: {len(base_questions)} preguntes detectades")
 
-    altres_models = st.file_uploader(
-        "Puja un o més PDFs",
-        type="pdf",
-        accept_multiple_files=True
+    all_results = []
+
+    for model_pdf in other_pdfs:
+
+        model_questions = extract_questions(model_pdf)
+        st.info(f"{model_pdf.name}: {len(model_questions)} preguntes detectades")
+
+        for question_text, base_number in base_questions.items():
+
+            model_number = model_questions.get(question_text, "NO TROBADA")
+
+            all_results.append({
+                "Pregunta_Model_A": base_number,
+                f"Pregunta_{model_pdf.name}": model_number
+            })
+
+    df = pd.DataFrame(all_results)
+
+    st.subheader("Resultat comparació")
+    st.dataframe(df)
+
+    csv = df.to_csv(index=False).encode("utf-8")
+
+    st.download_button(
+        label="Descarregar CSV",
+        data=csv,
+        file_name="correspondencia_models.csv",
+        mime="text/csv"
     )
-
-    if altres_models:
-
-        progress = st.progress(0)
-        resultats_totals = []
-
-        for idx, model_file in enumerate(altres_models):
-
-            model_preguntes = extreure_preguntes(model_file)
-            st.info(f"{model_file.name} → Preguntes trobades: {len(model_preguntes)}")
-
-            correspondencia = comparar_models(base_preguntes, model_preguntes)
-
-            for fila in correspondencia:
-                fila["Model"] = model_file.name
-
-            resultats_totals.extend(correspondencia)
-
-            progress.progress((idx + 1) / len(altres_models))
-
-        if resultats_totals:
-
-            df = pd.DataFrame(resultats_totals)
-
-            st.subheader("Resultats")
-            st.dataframe(df)
-
-            csv_buffer = io.StringIO()
-            df.to_csv(csv_buffer, index=False)
-
-            st.download_button(
-                label="Descarregar CSV",
-                data=csv_buffer.getvalue(),
-                file_name="correspondencia_models.csv",
-                mime="text/csv"
-            )
-
-        else:
-            st.warning("No s'han trobat coincidències exactes.")
-            
+    
